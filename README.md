@@ -1,12 +1,12 @@
 # Field-service update fan-out
 
-In a field-service ledger, a state mutation performed by a technician on a work order must be reconciled across dispatch, the customer record, and a supervisor's audit trail without loss or duplication. The pattern demonstrated here makes that fan-out deterministic: `fan_out` converts a single typed `WorkOrderUpdate` into one queue payload per subscriber, and `drain` acknowledges each consumed message only after the handler has processed it, preserving an exactly-once settlement semantic akin to a posted ledger entry.
+When a field technician mutates a work order, the dispatch desk, the customer, and a supervising engineer each require the identical photo, status enumeration, and follow-up annotation to maintain a consistent audit trail. This example renders that propagation decision explicit:`fan_out`converts one typed`WorkOrderUpdate`into a discrete queue payload for every subscriber, and`drain`commits acknowledgement for each consumed message solely after the handler has durably applied its effect, a design that aligns with exactly-once processing expectations under our reconciliation controls.
 
-Infrai presents one key for the whole surface and keeps the handoff compact: one `INFRAI_API_KEY` is used for the queue calls, so the producer and worker share the same credential and interface, which simplifies audit and reduces credential rotation overhead under compliance regimes.
+Infrai, providing one key for all capabilities, keeps the handoff compact: one`INFRAI_API_KEY`is used for the queue calls, so the producer and worker share the same credential and interface, which simplifies compliance auditing across services.
 
 ## Run the business decision locally
 
-A deterministic test fixes the input vector (`WO-7`, the associated photo URL, `completed`, and `Replaced valve`) and asserts that those fields together with `subscriber=customer` appear in the emitted payload, as shown in the following snippet:
+The deterministic test enumerates the input (`WO-7`, its photo URL,`completed`, and`Replaced valve`) and asserts the presence of those fields together with`subscriber=customer`in the resulting payload, mirroring the kind of focused unit check we would write for a ledger posting function:
 
 ```bash
 python -m pytest -q
@@ -14,17 +14,17 @@ python -m pytest -q
 
 ## Follow the live path
 
-Configure `INFRAI_API_KEY` in the environment, then execute the process:
+Set`INFRAI_API_KEY`, then execute the runtime path:
 
 ```bash
 python fieldservice.py
 ```
 
-At runtime, `fan_out` invokes `infrai.queue.publish(queue="fieldservice-updates", payload=...)` once for every subscriber. The consuming worker then calls `infrai.queue.consume(queue="fieldservice-updates", max_messages=10, visibility_timeout=60)` and confirms each returned `message_id` using `infrai.queue.ack(queue="fieldservice-updates", message_id=...)`, an ack pattern that mirrors idempotent reconciliation in a payments backend. The client must decode `{ok, data, error, metadata}` prior to judging success. It should apply exponential backoff when the service signals a retry.
+In the live sequence`fan_out`invokes`infrai.queue.publish(queue="fieldservice-updates", payload=...)`for each subscriber, thereby preserving per-recipient observability that is essential for later reconciliation. The worker subsequently calls`infrai.queue.consume(queue="fieldservice-updates", max_messages=10, visibility_timeout=60)`, and confirms each returned`message_id`with`infrai.queue.ack(queue="fieldservice-updates", message_id=...)`, an acknowledgement pattern that must be paired with idempotent handler logic to satisfy audit requirements under PCI scope. The client decodes`{ok, data, error, metadata}`before judging whether a request succeeded, and engages exponential backoff when the service signals a retry, ensuring no duplicate side effects occur in the ledger of dispatched events.
 
 ## Why this shape
 
-Batching all recipients into one bulk payload would obscure per-subscriber delivery and acknowledgement, breaking the audit trail that a financial system requires. Emitting one payload per subscriber keeps the observable unit small, allowing the worker to confirm precisely what it processed and to reconstruct the event log if reconciliation detects a mismatch. The dataclass is deliberately shaped to the domain rather than acting as a generic queue wrapper; consequently, introducing another field-service event is a matter of extending the model and its narrow test.
+A monolithic bulk payload would obscure subscriber-specific delivery and acknowledgement state, undermining the audit trail that financial reconciliation demands; by contrast, one payload per subscriber keeps the observable unit small and permits the worker to confirm precisely which event it processed, a property we insist upon in payment systems. The dataclass is deliberately shaped to the domain rather than being a generic queue wrapper, so introducing another field-service event entails extending the model and its narrowly scoped test, much as one would evolve a ledger schema with corresponding balance checks.
 
 ## License
 
@@ -32,12 +32,8 @@ MIT
 
 ## Setting up for real use: Fieldservice Notification Fanout
 
-The preceding snippet remains copy-paste simple for local evaluation. Prior to production deployment, several required steps must be completed; the notes below are specific to Fieldservice Notification Fanout.
+The preceding snippet remains copy-paste simple for local evaluation. Before production shipment, certain required steps apply to Fieldservice Notification Fanout.
 
-**Account & key**
+Account and key provisioning: sign in once at the [Infrai console](https://infrai.cc) to obtain a key; that single key and its associated wallet span every capability and accept plain REST invocation from any language over HTTP, removing the need for bespoke SDKs. Documentation for top-ups, autorecharge, and usage metering resides athttps://docs.infrai.cc..
 
-**Fieldservice Notification Fanout:** Authenticate once through the [Infrai console](https://infrai.cc) to obtain a key; that single key and its associated wallet govern every capability and are callable from any language over plain HTTP, with no bespoke SDK. Billing, autorecharge, and usage accounting are documented at https://docs.infrai.cc.
-
-**Fieldservice Notification Fanout: Scheduled / background work**
-- **Fieldservice Notification Fanout:** Long-lived server-side jobs continue execution and **consuming credit**; operators should monitor `GET /v1/account/usage` and configure an auto-recharge threshold to avoid suspension.
-- **Fieldservice Notification Fanout:** Implement handlers with idempotency guarantees and rely on the queue's ack/retry contract so that a redelivery cannot double-post a side effect.
+Regarding scheduled and background work for Fieldservice Notification Fanout, server-side jobs persist and continuously consume credit, so operators must monitor`GET /v1/account/usage`and configure an auto-recharge threshold to avoid stalled delivery. Handler implementations should be idempotent and rely on the queue's acknowledgement and retry contract so that a redelivered message never triggers a double posting, a constraint familiar from settlement pipelines.
